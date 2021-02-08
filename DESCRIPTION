@@ -1,0 +1,30 @@
+Package: STEPS
+Type: Package
+Title: Stress Testing Performance Scoring (STEPS)
+Version: 0.1.0
+Author: Tal Kozlovski
+Authors@R: person("Tal", "Kozlovski", email = "talkozlovski@gmail.com",
+  role = c("aut", "cre"))
+Maintainer: The package maintainer <talkozlovski@gmail.com>
+Description: Implementation of the Stress Testing Performance Scoring algorithm. 
+    A semi-supervised learning algorithm for scoring performance in stress test set-ups.
+License: What license is it under?
+Encoding: UTF-8
+LazyData: true
+Imports: 
+  magrittr,
+  AmesHousing,
+  caret,
+  h2o,
+  randomForest,
+  ranger,
+  rsample, 
+  rpart, 
+  dplyr, 
+  tidyr, 
+  data.table
+RoxygenNote: 7.1.1
+Suggests: 
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
