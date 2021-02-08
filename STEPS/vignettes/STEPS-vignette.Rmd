@@ -1,0 +1,551 @@
+---
+title: "STEPS-vignette"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{STEPS-vignette}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(STEPS)
+```
+
+
+```{r, echo = F}
+x_sim_fun <- function(n, pX = 1, R,
+                      motor_dif, cog_dif,
+                      severity.par,
+                      severity,
+                      z,
+                      diff.par,
+                      r.par) {
+
+  tab <- expand.grid("ID" = c(1:n),
+                     "R" = c(1:R),
+                     "motor_difficulty" = motor_dif,
+                     "cognitive_difficulty" = cog_dif)
+
+  tab2 <- left_join(tab,
+                    data.frame("ID" = c(1:n),
+                               "severity" =  severity,
+                               "z" = z))
+  tab2[, "x"] <- (severity.par * tab2$severity) +
+    (diff.par * tab2$motor_difficulty) +
+    (diff.par * tab2$cognitive_difficulty) +
+    (diff.par * tab2$motor_difficulty * tab2$cognitive_difficulty * tab2$severity) +
+    (-r.par * (tab2$R - 1))
+
+  return(tab2)
+
+
+}
+
+
+############# SIMULATION HELP FUNCTIONS
+SIM_ordering_setB_fun <- function(IDtimes.tab, data, setS) {
+  tmp_data.B <- setS %>%
+    dplyr::select(ID, motor_difficulty, cognitive_difficulty,
+                  S.group, n.S)
+  duped <- duplicated(tmp_data.B)
+  tmp_data.B <- tmp_data.B[!duped, ]
+
+  tmp_data.B1 <- tmp_data.B %>%
+    full_join(tmp_data.B, by = c("ID", "motor_difficulty")) %>%
+    filter(cognitive_difficulty.y > cognitive_difficulty.x) %>%
+    mutate(motor_difficulty.y = motor_difficulty,
+           ID.y = ID)
+
+  colnames(tmp_data.B1) <- c("ID.better", "motor_difficulty.better",
+                             "cognitive_difficulty.better",
+                             "S.group.better",
+                             "n.S.better",
+                             "cognitive_difficulty.severe",
+                             "S.group.severe",
+                             "n.S.severe",
+                             "motor_difficulty.severe",
+                             "ID.severe")
+
+
+  tmp_data.B2 <- tmp_data.B %>%
+    full_join(tmp_data.B, by = c("ID", "cognitive_difficulty")) %>%
+    filter(motor_difficulty.y > motor_difficulty.x)%>%
+    mutate(cognitive_difficulty.y = cognitive_difficulty,
+           ID.y = ID)
+
+  colnames(tmp_data.B2) <- c("ID.better", "motor_difficulty.better",
+                             "cognitive_difficulty.better",
+                             "S.group.better",
+                             "n.S.better",
+                             "motor_difficulty.severe",
+                             "S.group.severe",
+                             "n.S.severe",
+                             "cognitive_difficulty.severe",
+                             "ID.severe")
+
+
+  ordered_tab.B <- tmp_data.B1 %>%
+    full_join(tmp_data.B2)
+  ordered_tab.B <- ordered_tab.B %>%
+    left_join(ordered_tab.B %>%
+                group_by(ID.better, ID.severe) %>%
+                summarise("n.Bi" = n()))
+
+  return(ordered_tab.B)
+}
+
+
+SIM_ordering_setS_fun <- function(IDtimes.tab,
+                                  data) {
+  tmp_data.S <- data %>%
+    mutate("index" = c(1:nrow(data)),
+           "row.name" = rownames(data))
+  tmp_IDtimes.S <- IDtimes.tab %>%
+    mutate("row.name" = paste("ID_", IDtimes.tab$ID,
+                              ".", "Time_",
+                              IDtimes.tab$R, ".",
+                              "motor_",
+                              IDtimes.tab$motor_difficulty,
+                              "_cog_",
+                              IDtimes.tab$cognitive_difficulty,
+                              sep = "")) %>%
+    left_join(tmp_data.S %>% dplyr::select(row.name, index))
+
+  ordered_tab.S <- tmp_IDtimes.S
+  ordered_tab.S[, "S.group"] <- as.character(apply(ordered_tab.S[, c("ID", "motor_difficulty", "cognitive_difficulty")],
+                                                   1, paste, collapse = "_"))
+  ordered_tab.S %<>%
+    group_by(S.group) %>%
+    mutate("n.S" = n()) %>%
+    ungroup()
+  # %>%
+  #   mutate("I" = length(unique(IDtimes.tab$ID)))
+  return(ordered_tab.S)
+  # tmp_IDtimes.S[, "Indices"] <- c(1:nrow(data))
+
+}
+
+
+
+ord_pairs_fun <- function(pair, sort.by) {
+  ## ord_pairs_fun sorts pairs of observations to the better (left) and severe (right) states
+  # Input: @ pair - a pair of two observations indexes
+  #        @ sort.by  A vector with values to sort according to the given pair
+  # Output: vector of length 2, sorted from better to severe disease states.
+  if(sort.by[pair[1]] < sort.by[pair[2]]) {
+    return(pair)
+  }
+  else {
+    return(pair[c(2:1)])
+  }
+}
+
+
+SIM_ordering_setO_fun <- function(IDtimes.tab,
+                                  orderID,
+                                  data,
+                                  setS.ord.pairs) {
+
+  duped <- duplicated(IDtimes.tab)
+  IDtimes.tab <- IDtimes.tab[!duped, ]
+  setS.ord.pairs %<>%
+    dplyr::select(ID, motor_difficulty, cognitive_difficulty, S.group, n.S)
+  duped.S <- duplicated(setS.ord.pairs)
+  setS.ord.pairs <- setS.ord.pairs[!duped.S, ]
+
+  orderID1 <- as.data.frame(orderID)
+  # orderID2 <- as.data.frame(orderID)
+  colnames(orderID1) <- c("ID", "ID.severe")
+  # colnames(orderID2) <- c("ID.better", "ID")
+
+  full_tab1 <- orderID1 %>%
+    left_join(IDtimes.tab) %>%
+    left_join(setS.ord.pairs %>%
+                dplyr::select(ID, motor_difficulty, cognitive_difficulty, S.group, n.S)) %>%
+    group_by(S.group, ID, ID.severe, n.S) %>%
+    summarise("cognitive_difficulty" = unique(cognitive_difficulty),
+              "motor_difficulty" = unique(motor_difficulty)) %>%
+    ungroup()
+
+  colnames(full_tab1) <- c("Group.better", "ID.better", "ID", "n.S.better",
+                           "cognitive_difficulty", "motor_difficulty"
+  )
+  full_tab2 <- full_tab1 %>%
+    inner_join(IDtimes.tab) %>%
+    left_join(setS.ord.pairs)
+
+  colnames(full_tab2) <- c("Group.better",
+                           "ID.better", "ID.severe", "n.S.better",
+                           "cognitive_difficulty", "motor_difficulty",
+                           "Group.severe", "n.S.severe"
+  )
+  full_tab3 <- full_tab2 %>%
+    left_join(full_tab2 %>%
+                group_by(ID.severe, ID.better) %>%
+                summarise("dij" = n()) )
+
+  return(full_tab3)
+}
+
+
+
+sets_fun <- function(sim_dat,
+                     inds,
+                     severityVar) {
+  IDtimes.tab <- sim_dat[, c("ID", "R", "motor_difficulty", "cognitive_difficulty")]
+  # Create set B
+
+  setS.ord.pairs  <- SIM_ordering_setS_fun(IDtimes.tab = IDtimes.tab,
+                                           data = sim_dat)
+
+  setB.ord.pairs  <- SIM_ordering_setB_fun(IDtimes.tab = IDtimes.tab,
+                                           data = sim_dat,
+                                           setS = setS.ord.pairs) %>%
+    na.omit()
+  # Create set S
+
+
+  # Ordering pairs according to observed severity, Z
+  pairs <- t(combn(x = inds, m = 2))
+  ord.pairs <- t(apply(pairs, 1, ord_pairs_fun,
+                       sort.by = severityVar))
+  # Set O
+  setO.ord.pairs  <- SIM_ordering_setO_fun(IDtimes.tab = IDtimes.tab %>%
+                                             dplyr::select(-R) ,
+                                           # %>%
+                                           #   filter(!((motor_difficulty == 0) &
+                                           #              (cognitive_difficulty == 0))),
+                                           orderID = ord.pairs,
+                                           data = sim_dat,
+                                           setS.ord.pairs = setS.ord.pairs)
+
+  return(list("setO" = setO.ord.pairs,
+              "setS" = setS.ord.pairs,
+              "setB" = setB.ord.pairs))
+
+}
+
+
+```
+
+
+### Introduction 
+
+This document summarizes and demonstrates the use in the STEPS R package for Stress TEst Performance Scoring (STEPS) framework.  
+The STEPS framework is first building a semi-supervised regression model, where a set of ordered pairs according to subjects'  medical states, and based on existing domain knowledge and clinical measures, is exploited. 
+
+
+
+
+```{r}
+
+### Simulate severity variable
+n.subjects <- 120 # Number of subjects
+severity <- rnorm(n.subjects, 0, 1) # severity level of each subject
+severity01 <- (severity - min(severity)) / # Severity level percentized
+  (max(severity) - min(severity))
+severity.par <- 1 # fixed effect value of secerity
+diff.par <- 1 # fixed effect value of incresement in difficulty level
+r.par <- c(0, 0.5)
+motor_dif <- c(0, 1, 2) # ordered motor difficulty levels
+cog_dif   <- c(0, 1, 2) # Ordered cognitive difficulty levels
+## Varying parameters
+z.cors.severity <- c(1) # correlations between observed severity measure to real severity
+R <- c(2) # Number of repititions per observation in each difficulty level
+px <- 1
+# px <- c(1, 5, 10) # Explanatory variables number of dimensions
+rhos <- c(1)
+sd.para <- c(10^(-5))
+# weights to loss functions variants
+# setB & S weights are relative to set O (comaprisons between subjects)
+lambdaO <- c(1)
+lambdaB <- c(1, 10^(-2), 10^(-3))
+# lambdaB <- 1
+lambdaS <- c(1)
+n.trees <- 250
+
+
+scenario_tab <- expand.grid("Obs" = n.subjects,
+                            "p" = px,
+                            "z.cors.severity" = z.cors.severity,
+                            "R" = R,
+                            "Noise_level" = sd.para,
+                            "lambdaO" = lambdaO,
+                            "lambdaB" = lambdaB,
+                            "lambdaS" = lambdaS,
+                            "rpar" = r.par,
+                            "ntrees" = n.trees)
+
+cors.results <- NULL
+conc.results <- NULL
+trees_output <- list(list(NA))
+help_tab_train <- list(list(NA))
+help_tab_test <- list(list(NA))
+
+j <- 1
+i <- 1
+k <- 1
+n.sim <- 1
+for(i in 1:nrow(scenario_tab)) {
+  n                           <- scenario_tab[i, "Obs"]
+  p                           <- scenario_tab[i, "p"]
+  z.cors.severity.tmp         <- scenario_tab[i, "z.cors.severity"]
+  R                           <- scenario_tab[i, "R"]
+  noise.level                 <- scenario_tab[i, "Noise_level"]
+  lambdaO                     <- scenario_tab[i, "lambdaO"]
+  lambdaB                     <- scenario_tab[i, "lambdaB"]
+  lambdaS                     <- scenario_tab[i, "lambdaS"]
+  Rho                         <- scenario_tab[i, "Rho"]
+  ntrees                      <- scenario_tab[i, "ntrees"]
+  rpar                        <- scenario_tab[i, "rpar"]
+### Simulate observed severity measure, 90% correlated with the real severity
+  z.scenario <- severity * 1 + rnorm(n, 0,
+                                     sqrt((1 - z.cors.severity.tmp) / z.cors.severity.tmp)) # Create severity level
+
+  sim_dat.tmp <- x_sim_fun(n = n,
+                           pX = p,
+                           R = R,
+                           motor_dif, cog_dif,
+                           severity.par,
+                           severity01,
+                           z = z.scenario,
+                           diff.par,
+                           rpar)
+
+
+for(j in 1:n.sim) {
+  sim_dat.tmp[, paste0("x", c(1:p))] <- sim_dat.tmp[, grepl("x", colnames(sim_dat.tmp))] +
+    rnorm(nrow(sim_dat.tmp) * p, sd = sqrt(noise.level / p))
+
+  n.train <- floor(0.8 * n)
+  n.test  <- n - n.train
+
+  train.ind <- sort(sample(c(1:n), size = n.train, replace = F ))
+  test.ind <- c(1:n)[!(c(1:n) %in% train.ind)]
+
+  ## Divide the data to train and test
+  sim_dat_train <- sim_dat.tmp %>%
+    filter(ID %in% train.ind)
+  sim_dat_test <- sim_dat.tmp %>%
+    filter(ID %in% test.ind)
+
+
+
+  rownames(sim_dat_train)  <- as.character(paste("ID_",
+                                                 sim_dat_train$ID,
+                                                 ".", "Time_",
+                                                 sim_dat_train$R, ".",
+                                                 "motor_",
+                                                 sim_dat_train$motor_difficulty,
+                                                 "_cog_",
+                                                 sim_dat_train$cognitive_difficulty,
+                                                 sep = ""
+  ))
+
+  rownames(sim_dat_test)  <- as.character(paste("ID_",
+                                                sim_dat_test$ID,
+                                                ".", "Time_",
+                                                sim_dat_test$R, ".",
+                                                "motor_",
+                                                sim_dat_test$motor_difficulty,
+                                                "_cog_",
+                                                sim_dat_test$cognitive_difficulty,
+                                                sep = ""
+  ))
+
+
+
+  ordered_sets_train <- sets_fun(sim_dat = sim_dat_train,
+                                 inds = train.ind,
+                                 severityVar = z.scenario)
+  ordered_sets_train_oracle <- sets_fun(sim_dat = sim_dat_train,
+                                        inds = train.ind,
+                                        severityVar = severity01)
+  ordered_sets_test  <- sets_fun(sim_dat = sim_dat_test,
+                                 inds = test.ind,
+                                 severityVar = z.scenario)
+  ordered_sets_test_oracle <- sets_fun(sim_dat = sim_dat_test,
+                                       inds = test.ind,
+                                       severityVar = severity01)
+  # Define x variables to use in model
+  x_vars <- c("R", "motor_difficulty", "cognitive_difficulty", paste0("x", c(1:p)))
+  # Extract explanatory variables
+  train.x <- sim_dat_train %>%
+    dplyr::select(z, one_of(x_vars))
+  test.x <- sim_dat_test %>%
+    dplyr::select(z, one_of(x_vars))
+
+  n.Opairs.train <- nrow(ordered_sets_train[["setO"]] %>%
+                           dplyr::select(ID.better, ID.severe) %>%
+                           unique())
+  n.Opairs.test  <- nrow(ordered_sets_test[["setO"]] %>%
+                           dplyr::select(ID.better, ID.severe) %>%
+                           unique())
+
+
+  test_data <- list("data_test" = test.x %>% dplyr::select(-z))
+
+  # Number of of pairs of participants compared in set O
+
+
+
+  start <- Sys.time()
+  trees_output[[j]][[i]]        <- NLDSS(data = train.x %>% dplyr::select(-z),
+                                         setO.ord.pairs = ordered_sets_train[["setO"]],
+                                         setB.ord.pairs = ordered_sets_train[["setB"]],
+                                         setS.ord.pairs = ordered_sets_train[["setS"]],
+                                         n.O = n.Opairs.train,
+                                         lambdaO = lambdaO,
+                                         lambdaB = lambdaB,
+                                         lambdaS = lambdaS,
+                                         rpart_control = NULL,
+                                         rho = 1,
+                                         shrinkage = 1,
+                                         stop_terms = list("iter_count" = ntrees,
+                                                           "minimal_weight" = 10^(-6)),
+                                         test_data = test_data,
+                                         plot.weights = FALSE,
+                                         plot.iteration.trees = FALSE,
+                                         y_plot = NULL,
+                                         y_test_plot = NULL,
+                                         value_initialize = 0,
+                                         h = 0.5
+  )
+
+  end <- Sys.time()
+  print(difftime(end, start, units = "mins"))
+
+  help_tab_train[[j]][[i]] <- data.frame("iteration" = i,
+                                    "row.name" = names(trees_output[[j]][[i]]$predictions),
+                                    "pred" = trees_output[[j]][[i]]$predictions,
+                                    "ntrees" = trees_output[[j]][[i]]$n.trees) %>%
+    left_join(data.frame("row.name" = row.names(sim_dat_train),
+                         sim_dat_train))
+
+  help_tab_test[[j]][[i]] <- data.frame("iteration" = i,
+                                   "row.name" = names(trees_output[[j]][[i]]$test$test_predictions),
+                                   "pred" = trees_output[[j]][[i]]$test$test_predictions,
+                                   "ntrees" = trees_output[[j]][[i]]$n.trees) %>%
+    left_join(data.frame("row.name" = row.names(sim_dat_test),
+                         sim_dat_test))
+
+
+}
+saveRDS(help_tab_train, paste('sim_output\\help_tab_train_', Sys.Date(), '.rds', sep = ""))
+saveRDS(help_tab_test, paste('sim_output\\help_tab_test_', Sys.Date(), '.rds', sep = ""))
+saveRDS(trees_output, paste('sim_output\\trees_output_', Sys.Date(), '.rds', sep = ""))
+}
+
+
+saveRDS(help_tab_train, paste('sim_output\\help_tab_train_final_', Sys.Date(), '.rds', sep = ""))
+saveRDS(help_tab_test, paste('sim_output\\help_tab_test_final_', Sys.Date(), '.rds', sep = ""))
+saveRDS(trees_output, paste('sim_output\\trees_output_final_', Sys.Date(), '.rds', sep = ""))
+
+
+tab_train <- do.call('rbind', help_tab_train[[1]])
+# View(tab_train)
+head(tab_train)
+tab_train %>%
+  group_by(iteration, R, motor_difficulty, cognitive_difficulty, ntrees) %>%
+  summarise("corV" = cor(pred, x, method = "spearman")) %>% View()
+
+
+tab_train %>%
+  ggplot(aes(severity, pred, color = severity)) +
+  geom_jitter(width = 1, aes(shape = as.factor(R))) +
+  facet_grid(motor_difficulty ~ cognitive_difficulty)
+
+
+tmp <- tab_train %>%
+  group_by(iteration, ID, severity) %>%
+  summarise("mean_x" = mean(x1))
+
+cor(tmp$severity, tmp$mean_x, method = "spearman")
+
+
+
+tab_train %>%
+  as.data.frame() %>%
+  arrange(severity) %>%
+  filter(ID %in% sample(unique(tab_train$ID), size = 25)) %>%
+  mutate("normalized_y" = (pred - min(pred)) / (max(pred) - min(pred)),
+         "severity_f" = factor(severity, levels = sort(unique(sim_dat.tmp[, "severity"])), ordered = T)) %>%
+
+  ggplot(aes(x = motor_difficulty,
+             y = cognitive_difficulty,
+             fill = normalized_y)) +
+  geom_tile() +
+  scale_fill_viridis() +
+  coord_fixed(ratio = 1) +
+  facet_wrap(severity_f ~., ncol = 5)
+
+
+#########
+
+tab_test <- do.call('rbind', help_tab_test[[1]])
+# View(tab_test)
+head(tab_test)
+tab_test %>%
+  group_by(iteration, R, motor_difficulty, cognitive_difficulty, ntrees) %>%
+  summarise("corV" = cor(pred, x, method = "spearman")) %>% View()
+
+
+tab_test %>%
+  ggplot(aes(severity, pred, color = severity)) +
+  geom_point( aes(color = as.factor(R))) +
+  facet_grid(motor_difficulty ~ cognitive_difficulty)
+
+
+tmp <- tab_test %>%
+  group_by(iteration, ID, severity) %>%
+  summarise("mean_x" = mean(x1))
+
+cor(tmp$severity, tmp$mean_x, method = "spearman")
+
+
+
+tab_test %>%
+  as.data.frame() %>%
+  arrange(severity) %>%
+  # filter(ID %in% sample(unique(tab_test$ID), size = 25)) %>%
+  mutate("normalized_y" = (pred - min(pred)) / (max(pred) - min(pred)),
+         "severity_f" = factor(severity, levels = sort(unique(sim_dat.tmp[, "severity"])), ordered = T)) %>%
+
+  ggplot(aes(x = motor_difficulty,
+             y = cognitive_difficulty,
+             fill = normalized_y)) +
+  geom_tile() +
+  scale_fill_viridis() +
+  coord_fixed(ratio = 1) +
+  facet_wrap(severity_f ~., ncol = 5)
+
+
+
+### Check for simulating the right data
+
+sim_dat.tmp %>%
+  as.data.frame() %>%
+  arrange(severity) %>%
+  filter(ID %in% sample(unique(sim_dat.tmp$ID), size = 25)) %>%
+  mutate("normalized_x" = (x - min(x)) / (max(x) - min(x)),
+         "severity_f" = factor(severity, levels = sort(unique(sim_dat.tmp[, "severity"])), ordered = T)) %>%
+
+  ggplot(aes(x = motor_difficulty,
+             y = cognitive_difficulty,
+             fill = normalized_x)) +
+  geom_tile() +
+  scale_fill_viridis() +
+  coord_fixed(ratio = 1) +
+  facet_wrap(severity_f ~., ncol = 5)
+
+```
+
