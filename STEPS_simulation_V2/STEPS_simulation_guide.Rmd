@@ -1,0 +1,290 @@
+---
+title: "STEPS simulation summary"
+author: "Tal Kozlovski"
+date: "17-02-2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F)
+```
+
+<br>
+The following document reproduces the simulation study of the Stress TEst Performance Scoring (STEPS) framework. The simulation outline, parameters, and other information on the framework are detailed in the manuscript: XXXX
+
+<br>
+1. Source help functions file, this include:   
+  a. Detach all packages and clean environment   
+  b. Load required libraries    
+  c. Load simulation help functions   
+  d. print software versions  
+<br>
+```{r}
+source('R\\help_functions.r')
+
+```
+
+
+### Initialize simulation parameters
+<br>
+The simulation parameters are:  
+<br>
+1. Number of simulated subjects: $ID \in \{ 1, \dots , 200 \}$.  
+2. Two domains of difficulty levels, difficulty1 and difficulty2, each with 3 levels $\{ 0, 1, 2 \}$.  
+3. Two repetitions for each subject in each difficulty level $R \in \{ 1, 2 \}$.  
+4. Two domains of severity levels, $severity1, severity2 \sim \mathcal{N}(10, 1)$.  
+5. Subject severity is defined as their multiplication: $severity = severity1*severity2$.  
+6. Noise level added to bio-markers from stress test: $\sigma = 1$.  
+7. Noise ratio between stress test' biomarkers and simulated clinical variables: $NR \in \lbrace 0.01, \dots, 1 \rbrace$.  
+8. $px = 5$ - Number of biomarkers from stress test  
+9. STEPS function parameters:    
+        i) $\lambda_{\mathcal{B}} = 1$ ; $\lambda_{\mathcal{W}} \in \{ 0.1, 0.5, 1, 10 \}$ ; $\lambda_{\mathcal{R}} = 1$  
+        ii) Number of trees $50$ and learning rate of $1$.   
+10. Number of cores used is 2, and 250 iterations, per scenario, are done in each one in parallel.   
+<br>
+
+```{r}
+
+## Number of subjects 
+n.subjects <- 200
+
+## Difficulty level each simulated subject encounters
+levels.tab <- expand.grid("ID" = c(1:n.subjects), 
+                          "difficulty1" = c(0, 1, 2), 
+                          "difficulty2" = c(0, 1 , 2), 
+                          "R" = c(1, 2))
+
+ID_tab <- data.frame("ID" = c(1:n.subjects), 
+                     "severity1" = rnorm(n.subjects, 10, 1), 
+                     "severity2" = rnorm(n.subjects, 10, 1))  %>% 
+  mutate("severity" =  severity1 * severity2) %>% 
+  mutate("severity01" = percentize(severity))
+
+
+sd.para <- 1 # Noise level to be added to explanatory variables
+noise.ratio <- c(1, seq(10, 100, by = 10))
+px <- 5 # number of stress test biomarkers
+rhos <- c(1) # learning rate for gbm
+lambdaB <- 1 # Steps parameter
+lambdaW <- c(0.1, 0.5, 1, 10) # Steps parameter
+lambdaR <- 1 # Steps parameter
+n.trees <- c(50) # Steps parameter
+scenario_tab <- expand.grid("Obs" = n.subjects,
+                            "p" = px,
+                            "Noise_level" = sd.para,
+                            "Noise_ratio" = noise.ratio,
+                            "lambdaB" = lambdaB,
+                            "lambdaW" = lambdaW,
+                            "lambdaR" = lambdaR, 
+                            "Rho" = rhos, 
+                            "ntrees" = n.trees)
+```
+<br>
+
+- Prepare parallelization
+
+<br>
+
+```{r}
+### Preparing Parallelization  ----
+Tname <- c('scenario_tab')
+pacName <- c('MASS', 'data.table', 'magrittr', 'dplyr',  'rpart', 'reshape2', 'tidyr', 'pROC', 'plotROC', 'STEPS')
+
+num.cores <- detectCores()
+num.cores <- 2
+cl <- makeCluster(num.cores)
+registerDoParallel(cl)
+clusterExport(cl, Tname)
+
+# Number of iterations
+iter.num <- 250
+
+```
+
+<br>
+
+- Run simulation
+
+<br>
+```{r}
+## Result empty lists
+cors.results <- NULL # Correlations between performance and severity
+conc.results <- NULL # Concordance values 
+class.results <- NULL # classification abilities from planes. 
+
+
+## To run simulation switch run.flag.sim to TRUE
+run.flag.sim <- F
+if(run.flag.sim) {
+  ### Run simulation
+for(i in 1:nrow(scenario_tab)) {
+  print(paste("Scenario", i))
+  n.tmp                           <- scenario_tab[i, "Obs"]
+  p.tmp                           <- scenario_tab[i, "p"]
+  noise.level.tmp                 <- scenario_tab[i, "Noise_level"]
+  noise.ratio.tmp                 <- scenario_tab[i, "Noise_ratio"]
+  lambdaB.tmp                     <- scenario_tab[i, "lambdaB"]
+  lambdaW.tmp                     <- scenario_tab[i, "lambdaW"]
+  lambdaR.tmp                     <- scenario_tab[i, "lambdaR"]
+  rho.tmp                         <- scenario_tab[i, "Rho"]
+  ntrees.tmp                      <- scenario_tab[i, "ntrees"]
+  
+  # observed covariates
+  obs_cov <-  data.frame(ID_tab, 
+                         "score1" = ID_tab$severity1, 
+                          "score2" = ID_tab$severity2)
+  
+  sim_dat.tmp <- x_sim_fun(ID_tab, levels.tab, pX = p.tmp)
+  
+  
+  
+  temp.result <- foreach (j = 1:num.cores , 
+                          .packages = pacName, 
+                          .combine = 'comb',
+                          .options.RNG = 9999) %dorng% { 
+                            sim_fun(
+                              sim_dat = sim_dat.tmp,
+                              obs_cov = obs_cov,
+                              n = n.tmp,
+                              p = p.tmp,
+                              Rho = rho.tmp,
+                              noise.level = noise.level.tmp,
+                              noise.ratio = noise.ratio.tmp,
+                              lambdaB = lambdaB.tmp,
+                              lambdaW = lambdaW.tmp,
+                              lambdaR = lambdaR.tmp ,
+                              results.tab = scenario_tab[i, , drop = F],
+                              iter.num = iter.num,
+                              ntrees = ntrees.tmp
+                              )
+                          }
+  
+  
+  cors_results  <- temp.result[["cors_tab"]]
+  conc_results  <- temp.result[["concordance_tab"]]
+  class_results <- temp.result[["classification_tab"]]
+  
+  
+  cors.results <- bind_rows(cors.results, cors_results)
+  conc.results <- bind_rows(conc.results, conc_results)
+  class.results <- bind_rows(class.results, class_results)
+  
+  write_CSV_file_wrap_fun(arg = cors.results, 
+                          dir = 'Output\\', 
+                          file_name = paste0('Cors_Results_STEPS_Sce_i_', i ))
+  
+  write_CSV_file_wrap_fun(arg = conc.results, 
+                          dir = 'Output\\', 
+                          file_name = paste0('Concordance_Results_STEPS_Sce_i_', i ))
+  
+  write_CSV_file_wrap_fun(arg = class.results, 
+                          dir = 'Output\\', 
+                          file_name = paste0('Classification_Results_STEPS_Sce_i_', i))
+
+}
+
+
+
+
+}
+stopCluster(cl)
+
+```
+<br>
+
+- Save all iterations output in one file   
+
+<br>
+
+```{r}
+if(run.flag.sim) {
+  ### Saving results while avoiding error that cuased from lack of connection with the server
+write_CSV_file_wrap_fun(arg = cors.results, 
+                        dir = 'Output\\', 
+                        file_name = paste0('Cors_Results_STEPS_', Sys.Date()))
+write_CSV_file_wrap_fun(arg = conc.results, 
+                        dir = 'Output\\', 
+                        file_name = paste0('Concordance_Results_STEPS_', Sys.Date()))
+write_CSV_file_wrap_fun(arg = class.results, 
+                        dir = 'Output\\', 
+                        file_name = paste0('Classification_Results_STEPS_', Sys.Date()))
+
+save_RDS_file_wrap_fun(arg = cors.results, 
+                       dir = 'Output\\', 
+                       file_name = paste0('Cors_Results_STEPS_', Sys.Date()))
+save_RDS_file_wrap_fun(arg = conc.results, 
+                       dir = 'Output\\', 
+                       file_name = paste0('Concordance_Results_STEPS_', Sys.Date()))
+save_RDS_file_wrap_fun(arg = class.results, 
+                       dir = 'Output\\', 
+                       file_name = paste0('Classification_Results_STEPS_2020-11-29', Sys.Date()))
+}
+
+
+```
+
+
+Plot an example of the relationship between simulated "observed severity" as a function of the "real severity" and difficulty levels encountered during a stress test.   
+
+```{r}
+### Example for severity levels simulated in each difficulty level as a function of real hidden severity
+if(run.flag.sim) {
+  g_severity <- sim_dat.tmp %>%
+  ggplot(aes(severity01, obs_severity)) + 
+  geom_abline(intercept = 0, slope = 1) + 
+  geom_point() +
+  facet_grid(cog_diff ~ motor_diff, labeller = labeller(cog_diff = cog.labs, motor_diff = motor.labs)) + 
+  ylab("Observed severity udner stress") + 
+  xlab("Simulated percentized severity") + 
+  theme_classic() + 
+  theme(text = element_text(face = "bold", size = 10)) + 
+  theme_bw()
+
+
+
+
+
+
+ggsave("fig\\simulation_obs_severity.png", plot = g_severity, width=10.5, height = 6, dpi=500)
+ggsave("fig\\tiff\\simulation_obs_severity.tiff", plot = g_severity, dpi=500, device = "tiff")
+}
+
+
+knitr::include_graphics("fig\\simulation_obs_severity.png")
+
+```
+
+### Simulation results 
+
+
+
+```{r}
+## To produce plots, set Run.flag to TRUE
+run.flag <- F
+source('R\\simulation_results.r')
+```
+
+
+- plot figures: 
+
+#### Concordance results
+
+```{r}
+
+knitr::include_graphics("fig\\BWconcrdance.png")
+```
+
+
+#### Correlations results
+
+```{r}
+
+knitr::include_graphics("fig\\correlation.png")
+```
+
+#### Classification results
+
+```{r}
+
+knitr::include_graphics("fig\\classification.png")
+```
