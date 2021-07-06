@@ -23,6 +23,9 @@ magrittr::`%>%`
   if(!(class(sort.by)  %in% c("numeric", "integer"))) {
     stop("sort.by parametr need to be numeric or integer")
   }
+  if(sort.by[pair[1]] == sort.by[pair[2]]) {
+    return(NULL)
+  }
   # If the sort.by for index 1 is lower than that of index 2 the pair is returned
   if(sort.by[pair[1]] < sort.by[pair[2]]) {
     return(pair)
@@ -45,8 +48,8 @@ magrittr::`%>%`
 #'@export
 huber_loss <- function(a, h = 0.5) {
   out <- rep(0,  length(a))
-  ind_2 <- which(abs(a) < h)
-  ind_3 <- which(a >= h)
+  ind_2 <- which(abs(a) <= h)
+  ind_3 <- which(a > h)
   out[ind_2] <-  (a[ind_2] + h)^2 / (4 * h)
   out[ind_3] <-  a[ind_3]
   return(out)
@@ -108,7 +111,7 @@ count_rank_fun <- function(ind, ord.pairs) {
 #' @param pars Linear model equation's parameters.
 #' @param y.hat.fold a table with two columns, and a row per pair we know its ordering. Each row includes the predictions for each pair.
 #' @param h sapce parameter
-#' @return The function returns the value of the linear DSS model objective function.
+#' @return The function returns the value of the linear STEPS model objective function.
 #' @details The objective function is of the shape:
 #' \deqn{\frac{1}{2}\norm{w} + \frac{1}{2}*\sum_{pairs\in B}L_{h}\left( 1 - \hat{g}(x_{i}) - \hat{g}(x_{j}) \right)}
 #' @examples
@@ -133,7 +136,7 @@ linear_obj_term <- function(pars, y.hat.fold, h = 0.5) {
 #' @param lambdaW lambdaW
 #' @param lambdaR lambdaR
 #' @param h space parameter
-#' @return The function returns the value of the linear DSS model objective function.
+#' @return The function returns the value of the linear STEPS model objective function.
 #' @details The objective function is of the shape:
 #' \deqn{\frac{1}{2}\norm{w} + \frac{1}{2}*\sum_{pairs\in O}L_{h}\left( 1 - \hat{g}(x_{i}) - \hat{g}(x_{j}) \right)}
 #' @examples print("write an example")
@@ -164,6 +167,7 @@ non_linear_loss_fun <- function(Fx, setB, setW, setR,
 
 
   tmp.W <- setW %>%
+    as.data.frame() %>%
     left_join(data.frame("R.group.better" = names(Fx.mean),
                          "Fx.better.mean" = Fx.mean,
                          stringsAsFactors = F)) %>%
@@ -181,6 +185,7 @@ non_linear_loss_fun <- function(Fx, setB, setW, setR,
                    INDEX = setR$R.group,
                    FUN = var_error_term)
   tmp.R <-  setR %>%
+    as.data.frame() %>%
     left_join(data.frame("R.group" = names(Fx.var),
                          "Fx.var.R.group" = Fx.var,
                          stringsAsFactors = F))
@@ -214,6 +219,182 @@ var_error_term <- function(subject.Fx) {
   }
 }
 
+#' get number of unique IDs
+#'
+#' @param data
+#' @param ID_col "ID
+#' @return The function returns number of unique IDs
+#' @details The
+#' @examples
+#' @export
+.get_number_ids <- function(data, ID_col = "ID") {
+  n <- length(unique(as.data.frame(data)[, ID_col, drop = T]))
+  return(n)
+}
+
+
+#' get number of pairs in set B
+#'
+#' @param setBV
+#' @return The function returns number of pairs in set B
+#' @details The
+#' @examples
+#' @export
+.get_number_of_pairs <- function(setB) {
+  n_B <- setB %>%
+    group_by(ID.severe, ID.better) %>%
+    summarise(1) %>%
+    nrow()
+  return(n_B)
+}
+
+#' Average repeated measures
+#'
+#' @param Fx
+#' @param setR
+#' @return The function returns the average value for repeated measures per ID and difficulty level
+#' @details The
+#' @examples
+#' @export
+.average_repeated_measures <- function(Fx, setR) {
+  average_Fx <- tapply(X = Fx[setR$index],
+                       INDEX = setR$R.group,
+                       FUN = mean)
+  return(average_Fx)
+
+}
+
+#' .coalesce.na
+#'
+#' @param x
+#' @param ...
+#' @return The function returns 0 if NA
+#' @details The
+#' @examples
+#' @export
+.coalesce.na <- function(x, ...) {
+  x.len <- length(x)
+  ly <- list(...)
+  for (y in ly) {
+    y.len <- length(y)
+    if (y.len == 1) {
+      x[is.na(x)] <- y
+    } else {
+      if (x.len %% y.len != 0)
+        warning('object length is not a multiple of first object length')
+      pos <- which(is.na(x))
+      x[pos] <- y[(pos - 1) %% y.len + 1]
+    }
+  }
+  x
+}
+
+
+
+#' .calculate_deriv_b_term
+#'
+#' @param setB
+#' @param setR
+#' @param fX.MEAN
+#' @param ...
+#' @return Term B of the derivative
+#' @details The
+#' @examples
+#' @export
+.calculate_deriv_b_term <- function(setB, setR, Fx.mean, ...) {
+  tmp.B <- setB %>%
+    left_join(data.frame("Group.better" = names(Fx.mean),
+                         "Fx.better.mean" = Fx.mean,
+                         stringsAsFactors = F)) %>%
+    left_join(data.frame("Group.severe" = names(Fx.mean),
+                         "Fx.severe.mean" = Fx.mean,
+                         stringsAsFactors = F))
+
+  tmp.B <- data.table(tmp.B)
+  tmp.B[, "grad_loss_ijd" := .((1 / dij) * grad_huber_loss(1 - (Fx.severe.mean - Fx.better.mean), ...))]
+
+  means.better <- tmp.B[, sum(grad_loss_ijd * ( 1 / n.R.better)), by = Group.better][, setNames(V1, Group.better)]
+  means.severe <- tmp.B[, sum(grad_loss_ijd * ( -1 / n.R.severe)), by = Group.severe][, setNames(V1, Group.severe)]
+
+  b.term <- setR
+  b.term <- b.term %>%
+    left_join(data.frame("R.group" = names(means.better),
+                         "b_deriv_better" = means.better)) %>%
+    left_join(data.frame("R.group" = names(means.severe),
+                         "b_deriv_severe" = means.severe)) %>%
+    mutate("b.term" = .coalesce.na(b_deriv_better, 0) + .coalesce.na(b_deriv_severe, 0))
+
+  # b.term[, "b.term" := .( sum(0, (lambdaB / n.B) * ( means.severe[as.character(R.group)] +
+  #                                                      means.better[as.character(R.group)]), na.rm = T)),
+  #        by = index]
+  return(b.term)
+
+}
+
+#' .calculate_deriv_w_term
+#'
+#' @param setW
+#' @param setR
+#' @param fX.MEAN
+#' @param ...
+#' @return Term W of the derivative
+#' @details The
+#' @examples
+#' @export
+.calculate_deriv_w_term <- function(setW, setR, Fx.mean, ...) {
+
+  tmp.W <- setW %>%
+    left_join(data.frame("R.group.better" = names(Fx.mean),
+                         "Fx.better.mean" = Fx.mean,
+                         stringsAsFactors = F)) %>%
+    left_join(data.frame("R.group.severe" = names(Fx.mean),
+                         "Fx.severe.mean" = Fx.mean,
+                         stringsAsFactors = F))
+
+  tmp.W <- data.table(tmp.W)
+
+  tmp.W[, "grad_loss_id1d2" := .((1 / n.Wi) * grad_huber_loss(1 - (Fx.severe.mean - Fx.better.mean), ...))]
+  Wmeans.better <- tmp.W[, sum(grad_loss_id1d2 * ( 1 / n.R.better)), by = R.group.better][, setNames(V1, R.group.better)]
+  Wmeans.severe <- tmp.W[, sum(grad_loss_id1d2 * ( -1 / n.R.severe)), by = R.group.severe][, setNames(V1, R.group.severe)]
+
+  w.term <- setR
+  w.term <- w.term %>%
+    left_join(data.frame("R.group" = names(Wmeans.better),
+                         "w_deriv_better" = Wmeans.better)) %>%
+    left_join(data.frame("R.group" = names(Wmeans.severe),
+                         "w_deriv_severe" = Wmeans.severe)) %>%
+    mutate("w.term" = .coalesce.na(w_deriv_better, 0) + .coalesce.na(w_deriv_severe, 0))
+
+  # setDT(w.term)
+  # w.term[, "w.term" := .( sum(0, (lambdaW / n.id) * ( Wmeans.severe[as.character(R.group)] +
+  #                                                       Wmeans.better[as.character(R.group)]), na.rm = T)),
+  #        by = index]
+  return(w.term)
+
+}
+
+#' .calculate_deriv_r_term
+#'
+#' @param setR
+#' @param Fx
+#' @param Fx.mean
+#' @return Term R of the derivative
+#' @details The
+#' @examples
+#' @export
+.calculate_deriv_r_term <- function(setR, Fx, Fx.mean) {
+  r.term <- setR %>%
+    left_join(data.frame("R.group" = names(Fx.mean),
+                         "Fx.mean" = Fx.mean,
+                         stringsAsFactors = F)) %>%
+    left_join(setR %>% group_by(ID) %>% summarise("di" = length(unique(R.group)))) %>%
+    mutate("Fx" = Fx[index]) %>%
+    mutate("r.term" = (2 / di) * (1 / max(1, (n.R))) * (Fx - Fx.mean))
+
+  return(r.term)
+
+}
+
 
 #' Derivatibe of Loss Objective Function according to F(x)
 #'
@@ -230,79 +411,34 @@ var_error_term <- function(subject.Fx) {
 #' @details The objective function is of the shape:
 #' @examples
 #' @export
+
 deriv_fun <- function(Fx,
-                      n.B,
                       setB, setW, setR,
                       lambdaB, lambdaW, lambdaR,
-                      h) {
+                      ...) {
 
-  n.id <- length(unique(setR$ID))
-  Fx.mean <- tapply(X = Fx[setR$index],
-                    INDEX = setR$R.group,
-                    FUN = mean)
+  n.id <- .get_number_ids(setR, ID_col = "ID")
+  n_B <- .get_number_of_pairs(setB)
+  Fx.mean <- .average_repeated_measures(Fx, setR)
 
-
+  term.b <- .calculate_deriv_b_term(setB, setR, Fx.mean, ...) %>%
+    mutate("b.term" = (lambdaB / n_B) * b.term)
   # tic("o1")
-  tmp.B <- setB %>%
-    left_join(data.frame("Group.better" = names(Fx.mean),
-                         "Fx.better.mean" = Fx.mean,
-                         stringsAsFactors = F)) %>%
-    left_join(data.frame("Group.severe" = names(Fx.mean),
-                         "Fx.severe.mean" = Fx.mean,
-                         stringsAsFactors = F))
+  term.w <- .calculate_deriv_w_term(setW, setR, Fx.mean, ...) %>%
+    mutate("w.term" = (lambdaW / n.id) * w.term)
 
-  tmp.B <- data.table(tmp.B)
-  # setDT(tmp.B)
-  tmp.B[, "grad_loss_ijd" := .((1 / dij) * grad_huber_loss(1 - (Fx.severe.mean - Fx.better.mean), h = h))]
 
-  b.term <- setR
-  b.term <- data.table(b.term)
-  # setDT(b.term)
-  means.better <- tmp.B[, sum(grad_loss_ijd * ( 1 / n.R.better)), by = Group.better][, setNames(V1, Group.better)]
-  means.severe <- tmp.B[, sum(grad_loss_ijd * ( -1 / n.R.severe)), by = Group.severe][, setNames(V1, Group.severe)]
-  b.term[, "b.term" := .( sum(0, (lambdaB / n.B) * ( means.severe[as.character(R.group)] +
-                                                       means.better[as.character(R.group)]), na.rm = T)),
-         by = index]
-  tmp.W <- setDT(setW)
+  term.r <- .calculate_deriv_r_term(setR, Fx, Fx.mean) %>%
+    mutate("r.term" = (lambdaR / n.id) * r.term)
 
-  tmp.W <- setW %>%
-    left_join(data.frame("R.group.better" = names(Fx.mean),
-                         "Fx.better.mean" = Fx.mean,
-                         stringsAsFactors = F)) %>%
-    left_join(data.frame("R.group.severe" = names(Fx.mean),
-                         "Fx.severe.mean" = Fx.mean,
-                         stringsAsFactors = F))
 
-  setDT(tmp.W)
-
-  tmp.W[, "grad_loss_id1d2" := .((1 / n.Wi) * grad_huber_loss(1 - (Fx.severe.mean - Fx.better.mean), h = h))]
-
-  w.term <- setR
-  setDT(w.term)
-  Wmeans.better <- tmp.W[, sum(grad_loss_id1d2 * ( 1 / n.R.better)), by = R.group.better][, setNames(V1, R.group.better)]
-  Wmeans.severe <- tmp.W[, sum(grad_loss_id1d2 * ( -1 / n.R.severe)), by = R.group.severe][, setNames(V1, R.group.severe)]
-  w.term[, "w.term" := .( sum(0, (lambdaW / n.id) * ( Wmeans.severe[as.character(R.group)] +
-                                                 Wmeans.better[as.character(R.group)]), na.rm = T)),
-         by = index]
-  # toc()
-
-  r.term <- setR %>%
-    left_join(data.frame("R.group" = names(Fx.mean),
-                         "Fx.mean" = Fx.mean,
-                         stringsAsFactors = F)) %>%
-    left_join(setR %>% group_by(ID) %>% summarise("di" = length(unique(R.group)))) %>%
-    mutate("Fx" = Fx[index]) %>%
-    mutate("r.term" = (lambdaR / n.id) * (1 / di) * (1 / max(1, (n.R - 1 ))) * 2 * (Fx - Fx.mean))
-
-  out.deriv <- r.term[, c("index", "r.term")] %>%
-    left_join(b.term[, c("index", "b.term")]) %>%
-    left_join( w.term[, c("index", "w.term")] ) %>%
-    arrange(index) %>%
-    mutate("deriv" = b.term + r.term + w.term )
+  out.deriv <- term.b[, c("index", "b.term")] %>%
+    left_join( term.w[, c("index", "w.term")]) %>%
+    left_join(term.r[, c("index", "r.term")]) %>%
+    mutate("deriv" = b.term + w.term + r.term )
 
 
   return(out.deriv$deriv)
-
 
 }
 
@@ -316,7 +452,7 @@ deriv_fun <- function(Fx,
 #' @export
 grad_huber_loss <- function(a, h = 0.5) {
   out <- rep(0,  length(a))
-  ind_2 <- which(abs(a) < h)
+  ind_2 <- which(abs(a) <= h)
   ind_3 <- which(a > h)
   out[ind_2] <- (a[ind_2] + h)/ (2 * h)
   out[ind_3] <-  1
